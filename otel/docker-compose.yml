@@ -1,0 +1,122 @@
+services:
+  otel-collector:
+    image: amazon/aws-otel-collector:latest
+    container_name: local-otel-sandbox
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./local-testing-config.yml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - loki
+      - openlit
+      - prometheus
+      - tempo
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: local-otel-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: local-otel-tempo
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./tempo.yml:/etc/tempo/config.yaml:ro
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: local-otel-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-otlp-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: local-otel-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - loki
+      - prometheus
+      - tempo
+    restart: unless-stopped
+
+  openlit-clickhouse:
+    image: clickhouse/clickhouse-server:24.4.1
+    container_name: local-openlit-clickhouse
+    environment:
+      CLICKHOUSE_DATABASE: openlit
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: OPENLIT
+    volumes:
+      - openlit-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "clickhouse-client --user=$$CLICKHOUSE_USER --password=$$CLICKHOUSE_PASSWORD --query='SELECT 1'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  openlit:
+    image: ghcr.io/openlit/openlit:latest
+    container_name: local-openlit
+    environment:
+      TELEMETRY_ENABLED: "false"
+      INIT_DB_HOST: openlit-clickhouse
+      INIT_DB_PORT: "8123"
+      INIT_DB_DATABASE: openlit
+      INIT_DB_USERNAME: default
+      INIT_DB_PASSWORD: OPENLIT
+      SQLITE_DATABASE_URL: file:/app/client/data/data.db
+      PORT: "3000"
+      DOCKER_PORT: "3000"
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: ${OPENLIT_NEXTAUTH_SECRET}
+    ports:
+      - "3001:3000"
+    expose:
+      - "4317"
+      - "4318"
+    volumes:
+      - openlit-data:/app/client/data
+      - ./openlit-otel-collector-config.yml:/etc/otel/otel-collector-config.yaml:ro
+    depends_on:
+      openlit-clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  openlit-clickhouse-data:
+  openlit-data:
